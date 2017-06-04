@@ -5,7 +5,7 @@ use std::io::Read;
 static BUFLEN: usize = 256;
 
 enum Ast {
-    OpInt(String, Box<Ast>, Box<Ast>),
+    OpInt(char, Box<Ast>, Box<Ast>),
     Int(i32),
     Str(String),
 }
@@ -15,8 +15,7 @@ use Ast::{OpInt, Int, Str};
 impl std::fmt::Display for Ast {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
         match self {
-            &OpInt(ref op, ref l, ref r) => {
-                let c = if op == "add" { '+' } else { '-' };
+            &OpInt(c, ref l, ref r) => {
                 write!(f, "({} ", c)?;
                 l.fmt(f)?;
                 write!(f, " ")?;
@@ -61,13 +60,42 @@ fn emit_string(a: Ast) {
     panic!("want: Str, got: {}", a);
 }
 
+fn priority(op: char) -> i32 {
+    match op {
+        '+' | '-' => 1,
+        '*' | '/' => 2,
+        _ => panic!("Unknown binary operator: {}", op),
+    }
+}
+
+fn op(c: char) -> String {
+    match c {
+        '+' => "add".into(),
+        '-' => "sub".into(),
+        '*' => "imul".into(),
+        _ => panic!("Should not reach: {}", c),
+    }
+}
+
 fn emit_intexpr(a: Ast) {
     match a {
-        OpInt(op, box l, box r) => {
+        OpInt(c, box l, box r) => {
             emit_intexpr(l);
-            println!("\tmov %eax, %ebx");
+            println!("\tpush %rax");
             emit_intexpr(r);
-            println!("\t{} %ebx, %eax", op);
+            if c == '/' {
+                println!("\tmov %eax, %ebx");
+                println!("\tpop %rax");
+                println!("\tmov $0, %edx");
+                println!("\tidiv %ebx");
+            } else {
+                println!("\tpop %rbx");
+                if c == '-' {
+                    println!("\t{} %eax, %ebx", op(c));
+                } else {
+                    println!("\t{} %ebx, %eax", op(c));
+                }
+            }
         }
         Int(n) => {
             println!("\tmov ${}, %eax", n);
@@ -105,14 +133,14 @@ impl R {
         Some(res as char)
     }
 
-    fn unget(&mut self) {
+    fn ungetc(&mut self) {
         self.p -= 1;
     }
 
     fn skip_space(&mut self) {
         while let Some(c) = self.getc() {
             if !c.is_whitespace() {
-                self.unget();
+                self.ungetc();
                 return;
             }
         }
@@ -123,31 +151,30 @@ impl R {
             if let Some(k) = c.to_digit(10) {
                 n = n * 10 + k as i32;
             } else {
-                self.unget();
+                self.ungetc();
                 break;
             }
         }
         return Int(n);
     }
 
-    fn read_expr2(&mut self, left: Ast) -> Ast {
-        self.skip_space();
-        match self.getc() {
-            None => {
-                return left;
-            }
-            Some(c) => {
-                let op;
-                if c == '+' {
-                    op = "add";
-                } else if c == '-' {
-                    op = "sub";
-                } else {
-                    panic!("Operator expected, but got '{}'", c);
+    fn read_expr2(&mut self, prec: i32) -> Ast {
+        let mut ast = self.read_prim();
+        loop {
+            self.skip_space();
+            match self.getc() {
+                None => {
+                    return ast;
                 }
-                self.skip_space();
-                let left = OpInt(String::from(op), Box::new(left), Box::new(self.read_prim()));
-                return self.read_expr2(left);
+                Some(c) => {
+                    let prec2 = priority(c);
+                    if prec2 < prec {
+                        self.ungetc();
+                        return ast;
+                    }
+                    self.skip_space();
+                    ast = OpInt(c, Box::new(ast), Box::new(self.read_expr2(prec2 + 1)));
+                }
             }
         }
     }
@@ -182,8 +209,7 @@ impl R {
     }
 
     fn read_expr(&mut self) -> Ast {
-        let left = self.read_prim();
-        return self.read_expr2(left);
+        return self.read_expr2(0);
     }
 }
 
