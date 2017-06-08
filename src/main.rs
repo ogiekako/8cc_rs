@@ -7,10 +7,16 @@ static BUFLEN: usize = 256;
 enum Ast {
     OpInt(char, Box<Ast>, Box<Ast>),
     Int(i32),
-    Str(String),
+    Sym(String, usize), // name, pos.
 }
 
-use Ast::{OpInt, Int, Str};
+#[derive(Clone)]
+struct Var {
+    name: String,
+    pos: usize,
+}
+
+use Ast::{OpInt, Int, Sym};
 
 impl std::fmt::Display for Ast {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
@@ -25,46 +31,20 @@ impl std::fmt::Display for Ast {
             &Int(i) => {
                 write!(f, "{}", i)?;
             }
-            &Str(ref s) => {
-                write!(f, "{}", s)?;
+            &Sym(ref name, _) => {
+                write!(f, "{}", name)?;
             }
         }
         Ok(())
     }
 }
 
-
-fn print_quote(s: String) {
-    for c in s.chars() {
-        if c == '\"' || c == '\\' {
-            print!("{}", '\\');
-        }
-        print!("{}", c);
-    }
-}
-
-fn emit_string(a: Ast) {
-    if let Str(s) = a {
-        println!("\t.data");
-        println!(".mydata:");
-        print!(".string \"");
-        print_quote(s);
-        println!("\"");
-        println!("\t.text");
-        println!("\t.global stringfn");
-        println!("stringfn:");
-        println!("lea .mydata(%rip), %rax");
-        println!("ret");
-        return;
-    }
-    panic!("want: Str, got: {}", a);
-}
-
 fn priority(op: char) -> i32 {
     match op {
-        '+' | '-' => 1,
-        '*' | '/' => 2,
-        _ => panic!("Unknown binary operator: {}", op),
+        '=' => 1,
+        '+' | '-' => 2,
+        '*' | '/' => 3,
+        _ => -1,
     }
 }
 
@@ -77,12 +57,21 @@ fn op(c: char) -> String {
     }
 }
 
-fn emit_intexpr(a: Ast) {
+fn emit_expr(a: Ast) {
     match a {
         OpInt(c, box l, box r) => {
-            emit_intexpr(l);
+            if c == '=' {
+                emit_expr(r);
+                if let Sym(_, pos) = l {
+                    println!("\tmov %eax, -{}(%rbp)", pos * 4);
+                } else {
+                    panic!("Synbol expected");
+                }
+                return;
+            }
+            emit_expr(l);
             println!("\tpush %rax");
-            emit_intexpr(r);
+            emit_expr(r);
             if c == '/' {
                 println!("\tmov %eax, %ebx");
                 println!("\tpop %rax");
@@ -100,26 +89,15 @@ fn emit_intexpr(a: Ast) {
         Int(n) => {
             println!("\tmov ${}, %eax", n);
         }
-        _ => {
-            panic!("Unexpected token");
+        Sym(_, pos) => {
+            println!("\tmov -{}(%rbp), %eax", pos * 4);
         }
     }
 }
 
-fn compile(a: Ast) {
-    if let Str(_) = a {
-        emit_string(a);
-        return;
-    }
-    println!(".text");
-    println!("\t.global intfn");
-    println!("intfn:");
-    emit_intexpr(a);
-    println!("\tret");
-}
-
 struct R {
     buf: Vec<u8>,
+    vars: Vec<Var>,
     p: usize,
 }
 
@@ -135,6 +113,24 @@ impl R {
 
     fn ungetc(&mut self) {
         self.p -= 1;
+    }
+
+    fn find_var(&self, name: &str) -> Option<Var> {
+        for v in &self.vars {
+            if v.name == name {
+                return Some(v.clone());
+            }
+        }
+        None
+    }
+
+    fn make_var(&mut self, name: String) -> Var {
+        let v = Var {
+            name: name,
+            pos: self.vars.len() + 1,
+        };
+        self.vars.push(v.clone());
+        v
     }
 
     fn skip_space(&mut self) {
@@ -158,7 +154,44 @@ impl R {
         return Int(n);
     }
 
-    fn read_expr2(&mut self, prec: i32) -> Ast {
+    fn read_symbol(&mut self, c: char) -> Ast {
+        let mut name = String::new();
+        name.push(c);
+        loop {
+            let c = self.getc().expect("Unexpected EOF");
+            if !c.is_alphabetic() {
+                self.ungetc();
+                break;
+            }
+            name.push(c);
+            if name.len() >= BUFLEN {
+                panic!("Symbol too long");
+            }
+        }
+        let v = match self.find_var(&name) {
+            None => self.make_var(name),
+            Some(v) => v,
+        };
+        Sym(v.name, v.pos)
+    }
+
+    fn read_prim(&mut self) -> Option<Ast> {
+        match self.getc() {
+            None => None,
+            Some(c) => {
+                if let Some(k) = c.to_digit(10) {
+                    Some(self.read_number(k as i32))
+                } else if c.is_alphabetic() {
+                    Some(self.read_symbol(c))
+                } else {
+                    panic!("Don't know how to handle '{}'", c);
+                }
+            }
+        }
+    }
+
+    fn read_expr2(&mut self, prec: i32) -> Option<Ast> {
+        self.skip_space();
         let mut ast = self.read_prim();
         loop {
             self.skip_space();
@@ -168,60 +201,58 @@ impl R {
                 }
                 Some(c) => {
                     let prec2 = priority(c);
-                    if prec2 < prec {
+                    if prec2 < 0 || prec2 < prec {
                         self.ungetc();
                         return ast;
                     }
                     self.skip_space();
-                    ast = OpInt(c, Box::new(ast), Box::new(self.read_expr2(prec2 + 1)));
+                    ast = Some(OpInt(c,
+                                     Box::new(ast.unwrap()),
+                                     Box::new(self.read_expr2(prec2 + 1).unwrap())));
                 }
             }
         }
     }
 
-
-    fn read_string(&mut self) -> Ast {
-        let mut s = String::new();
-        while let Some(c) = self.getc() {
-            let mut c = c;
-            if c == '"' {
-                return Str(s);
-            } else if c == '\\' {
-                c = self.getc().expect("Unterminated \\");
-            }
-            s.push(c);
-            if s.len() + 1 >= BUFLEN {
-                panic!("String too long");
-            }
+    fn read_expr(&mut self) -> Option<Ast> {
+        let r = self.read_expr2(0);
+        if r.is_none() {
+            return None;
         }
-        panic!("Unterminated string");
-    }
-
-    fn read_prim(&mut self) -> Ast {
+        self.skip_space();
         let c = self.getc().expect("Unexpected EOF");
-        if let Some(k) = c.to_digit(10) {
-            return self.read_number(k as i32);
-        } else if c == '"' {
-            return self.read_string();
-        } else {
-            panic!("Don't know how to handle '{}'", c);
+        if c != ';' {
+            panic!("Unterminated expression");
         }
-    }
-
-    fn read_expr(&mut self) -> Ast {
-        return self.read_expr2(0);
+        r
     }
 }
 
 fn main() {
+    let wantast = std::env::args().nth(1) == Some(String::from("-a"));
+
     let mut buf = vec![];
     std::io::stdin().read_to_end(&mut buf).unwrap();
-    let mut r = R { buf: buf, p: 0 };
-    let a = r.read_expr();
+    let mut r = R {
+        buf: buf,
+        vars: vec![],
+        p: 0,
+    };
 
-    if std::env::args().nth(1) == Some(String::from("-a")) {
-        println!("{}", a);
-    } else {
-        compile(a);
+    if !wantast {
+        println!(".text");
+        println!("\t.global mymain");
+        println!("\tmymain:");
+    }
+
+    while let Some(ast) = r.read_expr() {
+        if wantast {
+            print!("{}", ast);
+        } else {
+            emit_expr(ast);
+        }
+    }
+    if !wantast {
+        println!("\tret");
     }
 }
