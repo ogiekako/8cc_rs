@@ -2,12 +2,18 @@
 
 use std::io::Read;
 
-static BUFLEN: usize = 256;
+const BUFLEN: usize = 256;
+const MAX_ARGS: usize = 6;
+const REGS: &'static [&'static str] = &["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
 
+#[derive(Debug)]
 enum Ast {
     OpInt(char, Box<Ast>, Box<Ast>),
     Int(i32),
-    Sym(String, usize), // name, pos.
+    // name, pos
+    Sym(String, usize),
+    // name, args
+    Funcall(String, Vec<Ast>),
 }
 
 #[derive(Clone)]
@@ -16,7 +22,7 @@ struct Var {
     pos: usize,
 }
 
-use Ast::{OpInt, Int, Sym};
+use Ast::{OpInt, Int, Sym, Funcall};
 
 impl std::fmt::Display for Ast {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
@@ -33,6 +39,16 @@ impl std::fmt::Display for Ast {
             }
             &Sym(ref name, _) => {
                 write!(f, "{}", name)?;
+            }
+            &Funcall(ref name, ref args) => {
+                write!(f, "{}(", name)?;
+                for i in 0..args.len() {
+                    if i > 0 {
+                        write!(f, ",")?;
+                    }
+                    args[i].fmt(f)?;
+                }
+                write!(f, ")")?;
             }
         }
         Ok(())
@@ -57,12 +73,12 @@ fn op(c: char) -> String {
     }
 }
 
-fn emit_expr(a: Ast) {
+fn emit_expr(a: &Ast) {
     match a {
-        OpInt(c, box l, box r) => {
+        &OpInt(c, ref l, ref r) => {
             if c == '=' {
                 emit_expr(r);
-                if let Sym(_, pos) = l {
+                if let &Sym(_, pos) = l.as_ref() {
                     println!("\tmov %eax, -{}(%rbp)", pos * 4);
                 } else {
                     panic!("Synbol expected");
@@ -86,11 +102,28 @@ fn emit_expr(a: Ast) {
                 }
             }
         }
-        Int(n) => {
+        &Int(n) => {
             println!("\tmov ${}, %eax", n);
         }
-        Sym(_, pos) => {
+        &Sym(_, pos) => {
             println!("\tmov -{}(%rbp), %eax", pos * 4);
+        }
+        &Funcall(ref name, ref args) => {
+            for i in 1..args.len() {
+                println!("\tpush %{}", REGS[i]);
+            }
+            for arg in args.iter() {
+                emit_expr(arg);
+                println!("\tpush %rax");
+            }
+            for i in (0..args.len()).rev() {
+                println!("\tpop %{}", REGS[i]);
+            }
+            println!("\tmov $0, %eax");
+            println!("\tcall {}", name);
+            for i in (1..args.len()).rev() {
+                println!("\tpop %{}", REGS[i]);
+            }
         }
     }
 }
@@ -154,25 +187,55 @@ impl R {
         return Int(n);
     }
 
-    fn read_symbol(&mut self, c: char) -> Ast {
+    fn read_ident(&mut self, c: char) -> String {
         let mut name = String::new();
         name.push(c);
         loop {
             let c = self.getc().expect("Unexpected EOF");
-            if !c.is_alphabetic() {
+            if !c.is_alphanumeric() {
                 self.ungetc();
-                break;
+                return name;
             }
             name.push(c);
             if name.len() >= BUFLEN {
-                panic!("Symbol too long");
+                panic!("Identifier too long");
             }
         }
-        let v = match self.find_var(&name) {
-            None => self.make_var(name),
-            Some(v) => v,
-        };
-        Sym(v.name, v.pos)
+    }
+
+    fn read_func_args(&mut self, fname: String) -> Ast {
+        let mut args = vec![];
+        for _ in 0..MAX_ARGS + 1 {
+            self.skip_space();
+            let c = self.getc().expect("Unexpected EOF");
+            if c == ')' {
+                break;
+            }
+            self.ungetc();
+            args.push(self.read_expr2(0).unwrap());
+            match self.getc() {
+                Some(')') => break,
+                Some(',') => self.skip_space(),
+                _ => panic!("Unexpected character: '{}'", c),
+            }
+        }
+        if args.len() == MAX_ARGS + 1 {
+            panic!("Too many arguments: {}", fname);
+        }
+        Funcall(fname, args)
+    }
+
+    fn read_ident_or_func(&mut self, c: char) -> Ast {
+        let name = self.read_ident(c);
+        self.skip_space();
+        match self.getc() {
+            Some('(') => self.read_func_args(name),
+            _ => {
+                self.ungetc();
+                let v = self.find_var(&name).unwrap_or_else(|| self.make_var(name));
+                Sym(v.name, v.pos)
+            }
+        }
     }
 
     fn read_prim(&mut self) -> Option<Ast> {
@@ -182,7 +245,7 @@ impl R {
                 if let Some(k) = c.to_digit(10) {
                     Some(self.read_number(k as i32))
                 } else if c.is_alphabetic() {
-                    Some(self.read_symbol(c))
+                    Some(self.read_ident_or_func(c))
                 } else {
                     panic!("Don't know how to handle '{}'", c);
                 }
@@ -222,7 +285,7 @@ impl R {
         self.skip_space();
         let c = self.getc().expect("Unexpected EOF");
         if c != ';' {
-            panic!("Unterminated expression");
+            panic!("Unterminated expression: {}", c);
         }
         r
     }
@@ -249,7 +312,7 @@ fn main() {
         if wantast {
             print!("{}", ast);
         } else {
-            emit_expr(ast);
+            emit_expr(&ast);
         }
     }
     if !wantast {
