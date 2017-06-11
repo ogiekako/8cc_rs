@@ -3,18 +3,23 @@
 use std::io::Read;
 
 const BUFLEN: usize = 256;
+const EXPR_LEN: usize = 100;
 const MAX_ARGS: usize = 6;
 const REGS: &'static [&'static str] = &["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Ast {
     OpInt(char, Box<Ast>, Box<Ast>),
     Int(i32),
     // name, pos
     Sym(String, usize),
+    // sval, sid
+    Str(String, usize),
     // name, args
     Funcall(String, Vec<Ast>),
 }
+
+use Ast::*;
 
 #[derive(Clone)]
 struct Var {
@@ -22,7 +27,25 @@ struct Var {
     pos: usize,
 }
 
-use Ast::{OpInt, Int, Sym, Funcall};
+struct Quote<'a> {
+    s: &'a str,
+}
+
+fn quote(s: &str) -> Quote {
+    Quote { s: s }
+}
+
+impl<'a> std::fmt::Display for Quote<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+        for c in self.s.chars() {
+            if c == '\"' || c == '\\' {
+                write!(f, "\\")?;
+            }
+            write!(f, "{}", c)?;
+        }
+        Ok(())
+    }
+}
 
 impl std::fmt::Display for Ast {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
@@ -39,6 +62,11 @@ impl std::fmt::Display for Ast {
             }
             &Sym(ref name, _) => {
                 write!(f, "{}", name)?;
+            }
+            &Str(ref name, _) => {
+                write!(f, "\"")?;
+                write!(f, "{}", quote(name))?;
+                write!(f, "\"")?;
             }
             &Funcall(ref name, ref args) => {
                 write!(f, "{}(", name)?;
@@ -108,6 +136,9 @@ fn emit_expr(a: &Ast) {
         &Sym(_, pos) => {
             println!("\tmov -{}(%rbp), %eax", pos * 4);
         }
+        &Str(_, sid) => {
+            println!("\tlea .s{}(%rip), %rax", sid);
+        }
         &Funcall(ref name, ref args) => {
             for i in 1..args.len() {
                 println!("\tpush %{}", REGS[i]);
@@ -131,6 +162,7 @@ fn emit_expr(a: &Ast) {
 struct R {
     buf: Vec<u8>,
     vars: Vec<Var>,
+    strings: Vec<Ast>,
     p: usize,
 }
 
@@ -164,6 +196,13 @@ impl R {
         };
         self.vars.push(v.clone());
         v
+    }
+
+    fn make_ast_str(&mut self, name: String) -> Ast {
+        let sid = self.strings.len();
+        let r = Str(name, sid);
+        self.strings.push(r.clone());
+        r
     }
 
     fn skip_space(&mut self) {
@@ -246,11 +285,31 @@ impl R {
                     Some(self.read_number(k as i32))
                 } else if c.is_alphabetic() {
                     Some(self.read_ident_or_func(c))
+                } else if c == '"' {
+                    Some(self.read_string())
                 } else {
                     panic!("Don't know how to handle '{}'", c);
                 }
             }
         }
+    }
+
+    fn read_string(&mut self) -> Ast {
+        let mut buf = String::new();
+        loop {
+            let mut c = self.getc().expect("Unterminated string");
+            if c == '"' {
+                break;
+            }
+            if c == '\\' {
+                c = self.getc().expect("Unterminated \\");
+            }
+            buf.push(c);
+            if buf.len() >= BUFLEN {
+                panic!("String too long");
+            }
+        }
+        self.make_ast_str(buf)
     }
 
     fn read_expr2(&mut self, prec: i32) -> Option<Ast> {
@@ -289,7 +348,24 @@ impl R {
         }
         r
     }
+
+    fn emit_data_section(&self) {
+        if self.strings.is_empty() {
+            return;
+        }
+        println!(".data");
+        for p in &self.strings {
+            if let &Str(ref sval, sid) = p {
+                println!(".s{}:", sid);
+                print!(".string \"{}", quote(sval));
+                println!("\"");
+            } else {
+                panic!("Str expected but was {}", p);
+            }
+        }
+    }
 }
+
 
 fn main() {
     let wantast = std::env::args().nth(1) == Some(String::from("-a"));
@@ -299,20 +375,31 @@ fn main() {
     let mut r = R {
         buf: buf,
         vars: vec![],
+        strings: vec![],
         p: 0,
     };
 
+    let mut exprs = vec![];
+    for _ in 0..EXPR_LEN {
+        if let Some(t) = r.read_expr() {
+            exprs.push(t);
+        } else {
+            break;
+        }
+    }
+
     if !wantast {
+        r.emit_data_section();
         println!(".text");
         println!("\t.global mymain");
         println!("\tmymain:");
     }
 
-    while let Some(ast) = r.read_expr() {
+    for expr in exprs.iter() {
         if wantast {
-            print!("{}", ast);
+            print!("{}", expr);
         } else {
-            emit_expr(&ast);
+            emit_expr(&expr);
         }
     }
     if !wantast {
