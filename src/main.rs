@@ -10,6 +10,7 @@ const REGS: &'static [&'static str] = &["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
 #[derive(Debug, Clone)]
 enum Ast {
     OpInt(char, Box<Ast>, Box<Ast>),
+    Char(char),
     Int(i32),
     // name, pos
     Var(String, usize),
@@ -59,6 +60,9 @@ impl std::fmt::Display for Ast {
             }
             &Int(i) => {
                 write!(f, "{}", i)?;
+            }
+            &Char(c) => {
+                write!(f, "'{}'", c)?;
             }
             &Var(ref name, _) => {
                 write!(f, "{}", name)?;
@@ -132,6 +136,9 @@ fn emit_expr(a: &Ast) {
         }
         &Int(n) => {
             println!("\tmov ${}, %eax", n);
+        }
+        &Char(c) => {
+            println!("\tmov ${}, %eax", c as u32);
         }
         &Var(_, pos) => {
             println!("\tmov -{}(%rbp), %eax", pos * 4);
@@ -277,16 +284,31 @@ impl R {
         }
     }
 
+    fn read_char(&mut self) -> Ast {
+        let err = || panic!("Unterminated char");
+        let mut c = self.getc().unwrap_or_else(&err);
+        if c == '\\' {
+            c = self.getc().unwrap_or_else(&err);
+        }
+        let c2 = self.getc().unwrap_or_else(&err);
+        if c2 != '\'' {
+            panic!("Malformed char constant");
+        }
+        Char(c)
+    }
+
     fn read_prim(&mut self) -> Option<Ast> {
         match self.getc() {
             None => None,
             Some(c) => {
                 if let Some(k) = c.to_digit(10) {
                     Some(self.read_number(k as i32))
-                } else if c.is_alphabetic() {
-                    Some(self.read_ident_or_func(c))
                 } else if c == '"' {
                     Some(self.read_string())
+                } else if c == '\'' {
+                    Some(self.read_char())
+                } else if c.is_alphabetic() {
+                    Some(self.read_ident_or_func(c))
                 } else {
                     panic!("Don't know how to handle '{}'", c);
                 }
