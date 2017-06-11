@@ -12,7 +12,7 @@ enum Ast {
     OpInt(char, Box<Ast>, Box<Ast>),
     Int(i32),
     // name, pos
-    Sym(String, usize),
+    Var(String, usize),
     // sval, sid
     Str(String, usize),
     // name, args
@@ -22,7 +22,7 @@ enum Ast {
 use Ast::*;
 
 #[derive(Clone)]
-struct Var {
+struct V {
     name: String,
     pos: usize,
 }
@@ -60,7 +60,7 @@ impl std::fmt::Display for Ast {
             &Int(i) => {
                 write!(f, "{}", i)?;
             }
-            &Sym(ref name, _) => {
+            &Var(ref name, _) => {
                 write!(f, "{}", name)?;
             }
             &Str(ref name, _) => {
@@ -106,7 +106,7 @@ fn emit_expr(a: &Ast) {
         &OpInt(c, ref l, ref r) => {
             if c == '=' {
                 emit_expr(r);
-                if let &Sym(_, pos) = l.as_ref() {
+                if let &Var(_, pos) = l.as_ref() {
                     println!("\tmov %eax, -{}(%rbp)", pos * 4);
                 } else {
                     panic!("Synbol expected");
@@ -133,7 +133,7 @@ fn emit_expr(a: &Ast) {
         &Int(n) => {
             println!("\tmov ${}, %eax", n);
         }
-        &Sym(_, pos) => {
+        &Var(_, pos) => {
             println!("\tmov -{}(%rbp), %eax", pos * 4);
         }
         &Str(_, sid) => {
@@ -161,7 +161,7 @@ fn emit_expr(a: &Ast) {
 
 struct R {
     buf: Vec<u8>,
-    vars: Vec<Var>,
+    vars: Vec<V>,
     strings: Vec<Ast>,
     p: usize,
 }
@@ -180,7 +180,7 @@ impl R {
         self.p -= 1;
     }
 
-    fn find_var(&self, name: &str) -> Option<Var> {
+    fn find_var(&self, name: &str) -> Option<V> {
         for v in &self.vars {
             if v.name == name {
                 return Some(v.clone());
@@ -189,8 +189,8 @@ impl R {
         None
     }
 
-    fn make_var(&mut self, name: String) -> Var {
-        let v = Var {
+    fn make_var(&mut self, name: String) -> V {
+        let v = V {
             name: name,
             pos: self.vars.len() + 1,
         };
@@ -272,7 +272,7 @@ impl R {
             _ => {
                 self.ungetc();
                 let v = self.find_var(&name).unwrap_or_else(|| self.make_var(name));
-                Sym(v.name, v.pos)
+                Var(v.name, v.pos)
             }
         }
     }
