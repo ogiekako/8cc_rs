@@ -4,7 +4,7 @@ CFLAGS=-Wall
 export RUST_BACKTRACE=1
 
 function compile {
-  echo "$1" | ./8cc_rs > tmp.s
+  echo "$1" | ./r8cc > tmp.s
   if [ $? -ne 0 ]; then
     echo "Failed to compile $1"
     exit
@@ -24,7 +24,7 @@ function assertequal {
 }
 
 function testast {
-  result="$(echo "$2" | ./8cc_rs -a)"
+  result="$(echo "$2" | ./r8cc -a)"
   if [ $? -ne 0 ]; then
     echo "Failed to compile $1"
     exit
@@ -39,7 +39,7 @@ function test {
 
 function testfail {
   expr="$1"
-  echo "$expr" | ./8cc_rs > /dev/null 2>&1
+  echo "$expr" | ./r8cc > /dev/null 2>&1
   if [ $? -eq 0 ]; then
     echo "Should fail to compile, but succeeded: $expr"
     exit
@@ -47,7 +47,7 @@ function testfail {
 }
 
 cargo build || exit 1
-cp target/debug/8cc_rs .
+cp target/debug/r8cc .
 
 testast '1' '1;'
 testast '(+ (- (+ 1 2) 3) 4)' '1+2-3+4;'

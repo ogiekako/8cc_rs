@@ -1,5 +1,5 @@
 [package]
-name = "8cc_rs"
+name = "r8cc"
 version = "0.1.0"
 authors = ["Keigo Oka <ogiekako@gmail.com>"]
 

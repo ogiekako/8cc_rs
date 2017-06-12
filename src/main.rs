@@ -1,8 +1,9 @@
 #![feature(box_syntax, box_patterns)]
 
 use std::io::Read;
+extern crate r8cc;
+use r8cc::lex::{Lex, Token};
 
-const BUFLEN: usize = 256;
 const EXPR_LEN: usize = 100;
 const MAX_ARGS: usize = 6;
 const REGS: &'static [&'static str] = &["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
@@ -167,26 +168,12 @@ fn emit_expr(a: &Ast) {
 }
 
 struct R {
-    buf: Vec<u8>,
+    lex: Lex,
     vars: Vec<V>,
     strings: Vec<Ast>,
-    p: usize,
 }
 
 impl R {
-    fn getc(&mut self) -> Option<char> {
-        if self.p >= self.buf.len() {
-            return None;
-        }
-        let res = self.buf[self.p];
-        self.p += 1;
-        Some(res as char)
-    }
-
-    fn ungetc(&mut self) {
-        self.p -= 1;
-    }
-
     fn find_var(&self, name: &str) -> Option<V> {
         for v in &self.vars {
             if v.name == name {
@@ -205,156 +192,75 @@ impl R {
         v
     }
 
-    fn make_ast_str(&mut self, name: String) -> Ast {
+    fn make_ast_string(&mut self, name: String) -> Ast {
         let sid = self.strings.len();
         let r = Str(name, sid);
         self.strings.push(r.clone());
         r
     }
 
-    fn skip_space(&mut self) {
-        while let Some(c) = self.getc() {
-            if !c.is_whitespace() {
-                self.ungetc();
-                return;
-            }
-        }
-    }
-
-    fn read_number(&mut self, mut n: i32) -> Ast {
-        while let Some(c) = self.getc() {
-            if let Some(k) = c.to_digit(10) {
-                n = n * 10 + k as i32;
-            } else {
-                self.ungetc();
-                break;
-            }
-        }
-        return Int(n);
-    }
-
-    fn read_ident(&mut self, c: char) -> String {
-        let mut name = String::new();
-        name.push(c);
-        loop {
-            let c = self.getc().expect("Unexpected EOF");
-            if !c.is_alphanumeric() {
-                self.ungetc();
-                return name;
-            }
-            name.push(c);
-            if name.len() >= BUFLEN {
-                panic!("Identifier too long");
-            }
-        }
-    }
-
     fn read_func_args(&mut self, fname: String) -> Ast {
         let mut args = vec![];
         for _ in 0..MAX_ARGS + 1 {
-            self.skip_space();
-            let c = self.getc().expect("Unexpected EOF");
-            if c == ')' {
+            let tok = self.lex.read_token();
+            if Some(Token::Punct(')')) == tok {
                 break;
             }
-            self.ungetc();
+            if let Some(tok) = tok {
+                self.lex.unget_token(tok);
+            }
             args.push(self.read_expr2(0).unwrap());
-            match self.getc() {
-                Some(')') => break,
-                Some(',') => self.skip_space(),
-                _ => panic!("Unexpected character: '{}'", c),
+            match self.lex.read_token() {
+                Some(Token::Punct(')')) => break,
+                Some(Token::Punct(',')) => {}
+                other => panic!("Unexpected token: '{}'", other.unwrap()),
             }
         }
-        if args.len() == MAX_ARGS + 1 {
+        if args.len() > MAX_ARGS {
             panic!("Too many arguments: {}", fname);
         }
         Funcall(fname, args)
     }
 
-    fn read_ident_or_func(&mut self, c: char) -> Ast {
-        let name = self.read_ident(c);
-        self.skip_space();
-        match self.getc() {
-            Some('(') => self.read_func_args(name),
-            _ => {
-                self.ungetc();
-                let v = self.find_var(&name).unwrap_or_else(|| self.make_var(name));
-                Var(v.name, v.pos)
-            }
+    fn read_ident_or_func(&mut self, name: String) -> Ast {
+        let tok = self.lex.read_token();
+        if let &Some(Token::Punct('(')) = &tok {
+            return self.read_func_args(name);
         }
-    }
-
-    fn read_char(&mut self) -> Ast {
-        let err = || panic!("Unterminated char");
-        let mut c = self.getc().unwrap_or_else(&err);
-        if c == '\\' {
-            c = self.getc().unwrap_or_else(&err);
+        if let Some(tok) = tok {
+            self.lex.unget_token(tok);
         }
-        let c2 = self.getc().unwrap_or_else(&err);
-        if c2 != '\'' {
-            panic!("Malformed char constant");
-        }
-        Char(c)
+        let v = self.find_var(&name).unwrap_or_else(|| self.make_var(name));
+        Var(v.name, v.pos)
     }
 
     fn read_prim(&mut self) -> Option<Ast> {
-        match self.getc() {
-            None => None,
-            Some(c) => {
-                if let Some(k) = c.to_digit(10) {
-                    Some(self.read_number(k as i32))
-                } else if c == '"' {
-                    Some(self.read_string())
-                } else if c == '\'' {
-                    Some(self.read_char())
-                } else if c.is_alphabetic() {
-                    Some(self.read_ident_or_func(c))
-                } else {
-                    panic!("Don't know how to handle '{}'", c);
-                }
-            }
-        }
-    }
-
-    fn read_string(&mut self) -> Ast {
-        let mut buf = String::new();
-        loop {
-            let mut c = self.getc().expect("Unterminated string");
-            if c == '"' {
-                break;
-            }
-            if c == '\\' {
-                c = self.getc().expect("Unterminated \\");
-            }
-            buf.push(c);
-            if buf.len() >= BUFLEN {
-                panic!("String too long");
-            }
-        }
-        self.make_ast_str(buf)
+        self.lex.read_token().map(|tok| match tok {
+            Token::Ident(s) => self.read_ident_or_func(s.clone()),
+            Token::Int(i) => Ast::Int(i),
+            Token::Char(c) => Ast::Char(c),
+            Token::Str(s) => self.make_ast_string(s),
+            Token::Punct(c) => panic!("unexpected character: '{}'", c),
+        })
     }
 
     fn read_expr2(&mut self, prec: i32) -> Option<Ast> {
-        self.skip_space();
         let mut ast = self.read_prim();
         loop {
-            self.skip_space();
-            match self.getc() {
-                None => {
-                    return ast;
-                }
-                Some(c) => {
-                    let prec2 = priority(c);
-                    if prec2 < 0 || prec2 < prec {
-                        self.ungetc();
-                        return ast;
-                    }
-                    self.skip_space();
+            let tok = self.lex.read_token();
+            if let &Some(Token::Punct(c)) = &tok {
+                let prec2 = priority(c);
+                if prec2 >= prec {
                     ast = Some(OpInt(c,
                                      Box::new(ast.unwrap()),
                                      Box::new(self.read_expr2(prec2 + 1).unwrap())));
+                    continue;
                 }
             }
+            if let Some(tok) = tok {
+                self.lex.unget_token(tok);
+            }
+            return ast;
         }
     }
 
@@ -363,10 +269,9 @@ impl R {
         if r.is_none() {
             return None;
         }
-        self.skip_space();
-        let c = self.getc().expect("Unexpected EOF");
-        if c != ';' {
-            panic!("Unterminated expression: {}", c);
+        let tok = self.lex.read_token().expect("Unexpected EOF");
+        if Token::Punct(';') != tok {
+            panic!("Unterminated expression: {}", tok);
         }
         r
     }
@@ -388,17 +293,15 @@ impl R {
     }
 }
 
-
 fn main() {
     let wantast = std::env::args().nth(1) == Some(String::from("-a"));
 
     let mut buf = vec![];
     std::io::stdin().read_to_end(&mut buf).unwrap();
     let mut r = R {
-        buf: buf,
+        lex: Lex::new(buf),
         vars: vec![],
         strings: vec![],
-        p: 0,
     };
 
     let mut exprs = vec![];
