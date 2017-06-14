@@ -2,13 +2,15 @@ use std;
 
 const BUFLEN: usize = 256;
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Clone)]
 pub enum Token {
     Ident(String),
     Punct(char),
     Int(i32),
     Char(char),
     Str(String),
+    // For debug
+    Eof,
 }
 
 use self::Token::*;
@@ -20,6 +22,7 @@ impl std::fmt::Display for Token {
             &Punct(c) | &Char(c) => write!(f, "'{}'", c),
             &Int(i) => write!(f, "{}", i),
             &Str(ref s) => write!(f, "\"{}\"", s),
+            &Eof => write!(f, "Eof"),
         }
     }
 }
@@ -52,13 +55,13 @@ impl Lex {
         self.p -= 1;
     }
 
-    fn skip_space(&mut self) {
+    fn getc_nonspace(&mut self) -> Option<char> {
         while let Some(c) = self.getc() {
             if !c.is_whitespace() {
-                self.ungetc();
-                return;
+                return Some(c);
             }
         }
+        None
     }
 
     fn read_number(&mut self, mut n: u32) -> Token {
@@ -121,8 +124,7 @@ impl Lex {
     }
 
     fn read_token_int(&mut self) -> Option<Token> {
-        self.skip_space();
-        self.getc().map(|c| match c {
+        self.getc_nonspace().map(|c| match c {
             '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' => {
                 self.read_number(c.to_digit(10).unwrap())
             }
@@ -142,6 +144,14 @@ impl Lex {
             panic!("Push back buffer is already full.");
         }
         self.ungotten = Some(tok);
+    }
+
+    pub fn peek_token(&mut self) -> Option<Token> {
+        let tok = self.read_token();
+        if let &Some(ref t) = &tok {
+            self.unget_token(t.clone());
+        }
+        tok
     }
 
     pub fn read_token(&mut self) -> Option<Token> {

@@ -8,20 +8,54 @@ const EXPR_LEN: usize = 100;
 const MAX_ARGS: usize = 6;
 const REGS: &'static [&'static str] = &["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 enum Ast {
     OpInt(char, Box<Ast>, Box<Ast>),
     Char(char),
     Int(i32),
     // name, pos
-    Var(String, usize),
+    Var(CType, String, usize),
     // sval, sid
     Str(String, usize),
     // name, args
     Funcall(String, Vec<Ast>),
+    // Var, expr
+    Decl(Box<Ast>, Box<Ast>),
+}
+use Ast::*;
+
+fn ensure_lvalue(ast: &Ast) {
+    if let &Var(_, _, _) = ast {
+    } else {
+        panic!("variable expected");
+    }
+}
+#[derive(Clone)]
+enum CType {
+    Void,
+    Int,
+    Char,
+    Str,
 }
 
-use Ast::*;
+#[inline]
+fn get_ctype(tok: &Token) -> Option<CType> {
+    if let &Token::Ident(ref s) = tok {
+        match s as &str {
+            "int" => Some(CType::Int),
+            "char" => Some(CType::Char),
+            "string" => Some(CType::Str),
+            _ => None,
+        }
+    } else {
+        None
+    }
+}
+
+#[inline]
+fn is_type_keyword(tok: &Token) -> bool {
+    get_ctype(tok).is_some()
+}
 
 #[derive(Clone)]
 struct V {
@@ -49,6 +83,19 @@ impl<'a> std::fmt::Display for Quote<'a> {
     }
 }
 
+impl std::fmt::Display for CType {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+        write!(f,
+               "{}",
+               match *self {
+                   CType::Void => "void",
+                   CType::Int => "int",
+                   CType::Char => "char",
+                   CType::Str => "string",
+               })
+    }
+}
+
 impl std::fmt::Display for Ast {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
         match self {
@@ -65,7 +112,7 @@ impl std::fmt::Display for Ast {
             &Char(c) => {
                 write!(f, "'{}'", c)?;
             }
-            &Var(ref name, _) => {
+            &Var(_, ref name, _) => {
                 write!(f, "{}", name)?;
             }
             &Str(ref name, _) => {
@@ -82,6 +129,14 @@ impl std::fmt::Display for Ast {
                     args[i].fmt(f)?;
                 }
                 write!(f, ")")?;
+            }
+            &Decl(ref var, ref init) => {
+                match var.as_ref() {
+                    &Var(ref ctype, ref name, _) => {
+                        write!(f, "(decl {} {} {})", ctype, name, init.as_ref())?
+                    }
+                    _ => panic!("Internal error: unexpected var: {}", var),
+                }
             }
         }
         Ok(())
@@ -106,16 +161,21 @@ fn op(c: char) -> String {
     }
 }
 
+fn emit_assign(var: &Ast, value: &Ast) {
+    emit_expr(value);
+    if let &Var(_, _, pos) = var {
+        println!("\tmov %eax, -{}(%rbp)", pos * 4);
+    } else {
+        panic!("Synbol expected");
+    }
+}
+
 fn emit_expr(a: &Ast) {
     match a {
         &OpInt(c, ref l, ref r) => {
+            // emit_binop
             if c == '=' {
-                emit_expr(r);
-                if let &Var(_, pos) = l.as_ref() {
-                    println!("\tmov %eax, -{}(%rbp)", pos * 4);
-                } else {
-                    panic!("Synbol expected");
-                }
+                emit_assign(l, r);
                 return;
             }
             emit_expr(l);
@@ -141,7 +201,7 @@ fn emit_expr(a: &Ast) {
         &Char(c) => {
             println!("\tmov ${}, %eax", c as u32);
         }
-        &Var(_, pos) => {
+        &Var(_, _, pos) => {
             println!("\tmov -{}(%rbp), %eax", pos * 4);
         }
         &Str(_, sid) => {
@@ -164,32 +224,40 @@ fn emit_expr(a: &Ast) {
                 println!("\tpop %{}", REGS[i]);
             }
         }
+        &Decl(ref var, ref init) => {
+            emit_assign(var, init);
+        }
     }
 }
 
 struct R {
     lex: Lex,
-    vars: Vec<V>,
+    vars: Vec<Ast>,
     strings: Vec<Ast>,
 }
 
 impl R {
-    fn find_var(&self, name: &str) -> Option<V> {
+    fn find_var(&self, name: &str) -> Option<Ast> {
         for v in &self.vars {
-            if v.name == name {
-                return Some(v.clone());
-            }
+            match v {
+                &Var(_, ref s, _) => {
+                    if s == name {
+                        return Some(v.clone());
+                    }
+                }
+                _ => {
+                    panic!("Internal error: expected Var but got {}", v);
+                }
+            };
         }
         None
     }
 
-    fn make_var(&mut self, name: String) -> V {
-        let v = V {
-            name: name,
-            pos: self.vars.len() + 1,
-        };
-        self.vars.push(v.clone());
-        v
+    fn make_ast_var(&mut self, ctype: CType, name: String) -> Ast {
+        let p = self.vars.len() + 1;
+        let var = Var(ctype.clone(), name.clone(), p);
+        self.vars.push(Var(ctype, name, p));
+        var
     }
 
     fn make_ast_string(&mut self, name: String) -> Ast {
@@ -209,7 +277,7 @@ impl R {
             if let Some(tok) = tok {
                 self.lex.unget_token(tok);
             }
-            args.push(self.read_expr2(0).unwrap());
+            args.push(self.read_expr(0).unwrap());
             match self.lex.read_token() {
                 Some(Token::Punct(')')) => break,
                 Some(Token::Punct(',')) => {}
@@ -230,8 +298,7 @@ impl R {
         if let Some(tok) = tok {
             self.lex.unget_token(tok);
         }
-        let v = self.find_var(&name).unwrap_or_else(|| self.make_var(name));
-        Var(v.name, v.pos)
+        self.find_var(&name).unwrap_or_else(|| panic!("Underfined variable: {}", name))
     }
 
     fn read_prim(&mut self) -> Option<Ast> {
@@ -241,39 +308,75 @@ impl R {
             Token::Char(c) => Ast::Char(c),
             Token::Str(s) => self.make_ast_string(s),
             Token::Punct(c) => panic!("unexpected character: '{}'", c),
+
+            Token::Eof => panic!("Internal error: Eof should not appear."),
         })
     }
 
-    fn read_expr2(&mut self, prec: i32) -> Option<Ast> {
-        let mut ast = self.read_prim();
+    fn read_expr(&mut self, prec: i32) -> Option<Ast> {
+        let ast = self.read_prim();
+        if ast.is_none() {
+            return None;
+        }
+        let mut ast = ast.unwrap();
         loop {
             let tok = self.lex.read_token();
             if let &Some(Token::Punct(c)) = &tok {
                 let prec2 = priority(c);
                 if prec2 >= prec {
-                    ast = Some(OpInt(c,
-                                     Box::new(ast.unwrap()),
-                                     Box::new(self.read_expr2(prec2 + 1).unwrap())));
+                    if tok == Some(Token::Punct('=')) {
+                        ensure_lvalue(&ast);
+                    }
+                    ast = OpInt(c,
+                                Box::new(ast),
+                                Box::new(self.read_expr(prec2 + 1).unwrap()));
                     continue;
                 }
             }
             if let Some(tok) = tok {
                 self.lex.unget_token(tok);
             }
-            return ast;
+            return Some(ast);
         }
     }
 
-    fn read_expr(&mut self) -> Option<Ast> {
-        let r = self.read_expr2(0);
-        if r.is_none() {
-            return None;
+    fn expect(&mut self, punct: char) {
+        let tok = self.lex.read_token();
+        if Some(Token::Punct(punct)) != tok {
+            panic!("'{}' expected, but got {}",
+                   punct,
+                   tok.unwrap_or(Token::Eof));
         }
-        let tok = self.lex.read_token().expect("Unexpected EOF");
-        if Token::Punct(';') != tok {
-            panic!("Unterminated expression: {}", tok);
+    }
+
+    fn read_decl(&mut self) -> Ast {
+        let ctype = get_ctype(&self.lex.read_token().expect("internal error: ctype expected"))
+            .expect("internal error: ctype expected");
+        let name = self.lex.read_token();
+
+        let var;
+        if let Some(Token::Ident(s)) = name {
+            var = self.make_ast_var(ctype, s);
+        } else {
+            panic!("Identifier expected, but got {}",
+                   name.unwrap_or(Token::Eof));
         }
-        r
+        self.expect('=');
+        let init = self.read_expr(0).expect("Unexpected EOF");
+        Decl(Box::new(var), Box::new(init))
+    }
+
+    fn read_decl_or_stmt(&mut self) -> Option<Ast> {
+        let tok = self.lex.peek_token();
+        tok.map(|tok| {
+            let r = if is_type_keyword(&tok) {
+                self.read_decl()
+            } else {
+                self.read_expr(0).expect("Unexpected EOF")
+            };
+            self.expect(';');
+            r
+        })
     }
 
     fn emit_data_section(&self) {
@@ -306,7 +409,7 @@ fn main() {
 
     let mut exprs = vec![];
     for _ in 0..EXPR_LEN {
-        if let Some(t) = r.read_expr() {
+        if let Some(t) = r.read_decl_or_stmt() {
             exprs.push(t);
         } else {
             break;
