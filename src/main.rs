@@ -8,8 +8,16 @@ const EXPR_LEN: usize = 100;
 const MAX_ARGS: usize = 6;
 const REGS: &'static [&'static str] = &["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
 
+#[derive(Clone, Copy)]
+enum CType {
+    Void,
+    Int,
+    Char,
+    Str,
+}
+
 #[derive(Clone)]
-enum Ast {
+enum Node {
     OpInt(char, Box<Ast>, Box<Ast>),
     Char(char),
     Int(i32),
@@ -22,20 +30,62 @@ enum Ast {
     // Var, expr
     Decl(Box<Ast>, Box<Ast>),
 }
-use Ast::*;
+
+#[derive(Clone)]
+struct Ast {
+    ctype: CType,
+    node: Node,
+}
+
+fn make_ast_op(op: char, ctype: CType, left: Ast, right: Ast) -> Ast {
+    Ast {
+        ctype: ctype,
+        node: OpInt(op, Box::new(left), Box::new(right)),
+    }
+}
+
+fn make_ast_int(val: i32) -> Ast {
+    Ast {
+        ctype: CType::Int,
+        node: Int(val),
+    }
+}
+
+fn make_ast_char(c: char) -> Ast {
+    Ast {
+        ctype: CType::Char,
+        node: Char(c),
+    }
+}
+
+fn make_ast_funcall(name: String, args: Vec<Ast>) -> Ast {
+    Ast {
+        ctype: CType::Int,
+        node: Funcall(name, args),
+    }
+}
+
+use Node::*;
 
 fn ensure_lvalue(ast: &Ast) {
-    if let &Var(_, _, _) = ast {
+    if let &Var(_, _, _) = &ast.node {
     } else {
         panic!("variable expected");
     }
 }
-#[derive(Clone)]
-enum CType {
-    Void,
-    Int,
-    Char,
-    Str,
+
+fn result_type(op: char, a: &Ast, b: &Ast) -> CType {
+    let err = || {
+        panic!("incompatible operands: {} and {} for {}", a, b, op);
+    };
+    match (a.ctype, b.ctype) {
+        (CType::Void, _) | (_, CType::Void) => err(),
+        (CType::Int, CType::Int) |
+        (CType::Int, CType::Char) |
+        (CType::Char, CType::Int) |
+        (CType::Char, CType::Char) => CType::Int,
+        _ => err(),
+    }
 }
 
 #[inline]
@@ -98,7 +148,7 @@ impl std::fmt::Display for CType {
 
 impl std::fmt::Display for Ast {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
-        match self {
+        match &self.node {
             &OpInt(c, ref l, ref r) => {
                 write!(f, "({} ", c)?;
                 l.fmt(f)?;
@@ -131,7 +181,7 @@ impl std::fmt::Display for Ast {
                 write!(f, ")")?;
             }
             &Decl(ref var, ref init) => {
-                match var.as_ref() {
+                match &var.as_ref().node {
                     &Var(ref ctype, ref name, _) => {
                         write!(f, "(decl {} {} {})", ctype, name, init.as_ref())?
                     }
@@ -143,6 +193,12 @@ impl std::fmt::Display for Ast {
     }
 }
 
+#[inline]
+fn is_right_assoc(op: char) -> bool {
+    op == '='
+}
+
+#[inline]
 fn priority(op: char) -> i32 {
     match op {
         '=' => 1,
@@ -163,7 +219,7 @@ fn op(c: char) -> String {
 
 fn emit_assign(var: &Ast, value: &Ast) {
     emit_expr(value);
-    if let &Var(_, _, pos) = var {
+    if let &Var(_, _, pos) = &var.node {
         println!("\tmov %eax, -{}(%rbp)", pos * 4);
     } else {
         panic!("Synbol expected");
@@ -171,7 +227,7 @@ fn emit_assign(var: &Ast, value: &Ast) {
 }
 
 fn emit_expr(a: &Ast) {
-    match a {
+    match &a.node {
         &OpInt(c, ref l, ref r) => {
             // emit_binop
             if c == '=' {
@@ -239,7 +295,7 @@ struct R {
 impl R {
     fn find_var(&self, name: &str) -> Option<Ast> {
         for v in &self.vars {
-            match v {
+            match &v.node {
                 &Var(_, ref s, _) => {
                     if s == name {
                         return Some(v.clone());
@@ -255,14 +311,20 @@ impl R {
 
     fn make_ast_var(&mut self, ctype: CType, name: String) -> Ast {
         let p = self.vars.len() + 1;
-        let var = Var(ctype.clone(), name.clone(), p);
-        self.vars.push(Var(ctype, name, p));
+        let var = Ast {
+            ctype: ctype,
+            node: Var(ctype, name, p),
+        };
+        self.vars.push(var.clone());
         var
     }
 
     fn make_ast_string(&mut self, name: String) -> Ast {
         let sid = self.strings.len();
-        let r = Str(name, sid);
+        let r = Ast {
+            ctype: CType::Str,
+            node: Str(name, sid),
+        };
         self.strings.push(r.clone());
         r
     }
@@ -287,7 +349,7 @@ impl R {
         if args.len() > MAX_ARGS {
             panic!("Too many arguments: {}", fname);
         }
-        Funcall(fname, args)
+        make_ast_funcall(fname, args)
     }
 
     fn read_ident_or_func(&mut self, name: String) -> Ast {
@@ -304,8 +366,8 @@ impl R {
     fn read_prim(&mut self) -> Option<Ast> {
         self.lex.read_token().map(|tok| match tok {
             Token::Ident(s) => self.read_ident_or_func(s.clone()),
-            Token::Int(i) => Ast::Int(i),
-            Token::Char(c) => Ast::Char(c),
+            Token::Int(i) => make_ast_int(i),
+            Token::Char(c) => make_ast_char(c),
             Token::Str(s) => self.make_ast_string(s),
             Token::Punct(c) => panic!("unexpected character: '{}'", c),
 
@@ -327,9 +389,10 @@ impl R {
                     if tok == Some(Token::Punct('=')) {
                         ensure_lvalue(&ast);
                     }
-                    ast = OpInt(c,
-                                Box::new(ast),
-                                Box::new(self.read_expr(prec2 + 1).unwrap()));
+                    let rest = self.read_expr(prec2 + if is_right_assoc(c) { 0 } else { 1 })
+                        .unwrap();
+                    let ctype = result_type(c, &ast, &rest);
+                    ast = make_ast_op(c, ctype, ast, rest);
                     continue;
                 }
             }
@@ -363,7 +426,10 @@ impl R {
         }
         self.expect('=');
         let init = self.read_expr(0).expect("Unexpected EOF");
-        Decl(Box::new(var), Box::new(init))
+        Ast {
+            ctype: ctype,
+            node: Decl(Box::new(var), Box::new(init)),
+        }
     }
 
     fn read_decl_or_stmt(&mut self) -> Option<Ast> {
@@ -385,7 +451,7 @@ impl R {
         }
         println!(".data");
         for p in &self.strings {
-            if let &Str(ref sval, sid) = p {
+            if let &Str(ref sval, sid) = &p.node {
                 println!(".s{}:", sid);
                 print!(".string \"{}", quote(sval));
                 println!("\"");
